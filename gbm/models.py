@@ -1,16 +1,16 @@
 # coding: utf-8
 
 import numpy
-from gbm.helpers import Data, Tree, TreeNode, Predicate
+from gbm.helpers import Tree, TreeNode, Predicate
 
 
 class DecisionTreeRegressor(object):
-    def _fit_node(self, node, data, eps):
-        # type: (TreeNode, Data, float) -> None
+    def _fit_node(self, node, data, target, eps):
+        # type: (TreeNode, numpy.ndarray, numpy.ndarray, float) -> None
 
         # print('node mask', node.mask)
 
-        node.leaf_value = data.target[node.mask].mean()
+        node.leaf_value = target[node.mask].mean()
         if node.mask.shape[0] == 1:
             return
 
@@ -18,9 +18,9 @@ class DecisionTreeRegressor(object):
             raise RuntimeError('tree node has empty mask')
 
         # Sort data for this node
-        sorted_args = numpy.argsort(data.data[node.mask], axis=0)
-        sorted_data = data.data[node.mask][sorted_args, numpy.arange(0, sorted_args.shape[1])]
-        sorted_target = numpy.tile(data.target[node.mask], (sorted_args.shape[1], 1)).transpose()[sorted_args, numpy.arange(0, sorted_args.shape[1])]
+        sorted_args = numpy.argsort(data[node.mask], axis=0)
+        sorted_data = data[node.mask][sorted_args, numpy.arange(0, sorted_args.shape[1])]
+        sorted_target = numpy.tile(target[node.mask], (sorted_args.shape[1], 1)).transpose()[sorted_args, numpy.arange(0, sorted_args.shape[1])]
 
         target_cumsum = sorted_target.cumsum(axis=0)
         cumsum_range = numpy.arange(1, target_cumsum.shape[0]).reshape((-1, 1))
@@ -50,7 +50,7 @@ class DecisionTreeRegressor(object):
             split_sample_2 = node.mask[sorted_args[best_feature_splits[best_feature] + 1, best_feature]]
 
             # Create predicate
-            split_value = (data.data[split_sample_1, best_feature] + data.data[split_sample_2, best_feature]) / 2
+            split_value = (data[split_sample_1, best_feature] + data[split_sample_2, best_feature]) / 2
             node.predicate = Predicate(feature_id=best_feature, value=split_value)
 
             # Split data
@@ -58,8 +58,10 @@ class DecisionTreeRegressor(object):
             node.right = TreeNode(mask=node.mask[sorted_args[best_feature_splits[best_feature] + 1:, best_feature]])
             node.left.depth = node.right.depth = node.depth + 1
 
-            self._fit_node(node.left, data, eps)
-            self._fit_node(node.right, data, eps)
+            self._fit_node(node.left, data, target, eps)
+            self._fit_node(node.right, data, target, eps)
+        else:
+            node.is_leaf = True
 
     def __init__(self, max_depth=None):
         # type: () -> None
@@ -69,26 +71,20 @@ class DecisionTreeRegressor(object):
     def reset(self):
         self.tree = Tree()
 
-    def fit(self, data, eps=1e-7):
-        # type: (Data) -> DecisionTreeRegressor
-
-        if not isinstance(data, Data):
-            raise ValueError('wrong data type, got: {}, expected: {}'.format(type(data), Data))
-
-        if not data.prepared:
-            data.setup()
+    def fit(self, data, target, eps=1e-7):
+        # type: (numpy.ndarray, numpy.ndarray) -> DecisionTreeRegressor
 
         self.tree.root.mask = numpy.arange(0, data.shape[0], dtype=numpy.uint64)
-        self.tree.root.leaf_value = data.target.mean()
+        self.tree.root.leaf_value = target.mean()
         self.tree.root.depth = 0
 
-        self._fit_node(self.tree.root, data, eps)
+        self._fit_node(self.tree.root, data, target, eps)
         return self
 
     def predict(self, data):
-        # type: (Data) -> numpy.ndarray
+        # type: (numpy.ndarray) -> numpy.ndarray
 
-        return self._predict(self.tree.root, data.data)
+        return self._predict(self.tree.root, data)
 
     def _predict(self, node, data):
         # type: (TreeNode, numpy.ndarray) -> numpy.ndarray
@@ -106,9 +102,11 @@ class DecisionTreeRegressor(object):
 
     def leafs(self, node=None):
         if node is None:
-            return self.leafs(self.tree.root.right) + self.leafs(self.tree.root.left)
+            yield from self.leafs(self.tree.root.right)
+            yield from self.leafs(self.tree.root.left)
         else:
             if node.left is None and node.right is None:
-                return [node]
+                yield node
             else:
-                return self.leafs(node.left) + self.leafs(node.right)
+                yield from self.leafs(node.left)
+                yield from self.leafs(node.right)

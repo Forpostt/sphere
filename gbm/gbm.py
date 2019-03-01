@@ -3,8 +3,8 @@
 import tqdm
 import numpy
 
-from gbm import Data, DecisionTreeRegressor
-from sklearn.tree import DecisionTreeRegressor as SkTree
+from gbm import DecisionTreeRegressor
+from gbm.utils import sigmoid
 
 
 class Estimator(object):
@@ -16,115 +16,92 @@ class Estimator(object):
         return self.model.predict(data) * self.b
 
 
-class GradientBoostingClassifier(object):
+class GradientBoostingClassifier(object):    
     @staticmethod
-    def _sigmoid(target):
-        # type: (numpy.ndarray) -> numpy.ndarray
-        return 1 / (1 + numpy.exp(-target))
-    
-    def __init__(self, n_estimators, max_depth=None, init_model=None, learning_rate=0.1):
+    def _loss(target, predict):
+        # type: (numpy.ndarray, numpy.ndarray) -> float
+        p = sigmoid(predict) + 1e-7
+        return (-target * numpy.log(p) - (1 - target) * numpy.log(1 - p)).sum()
+
+    @staticmethod
+    def negative_gradient(target, previous_predict):
+        # type: (numpy.ndarray, numpy.ndarray) -> numpy.ndarray
+        return target - sigmoid(previous_predict)
+
+    def __init__(self, n_estimators, max_depth=None, learning_rate=0.1):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.learning_rate = learning_rate
 
-        self.init_model = init_model
         self.trained_estimators = []
+        self.init_scale = None
 
-    def _loss(self, target, predict):
-        # type: (numpy.ndarray, numpy.ndarray) -> float
-        p = self._sigmoid(predict) + 1e-7
-        return (-target * numpy.log(p) - (1 - target) * numpy.log(1 - p)).sum()
+    def fit(self, data, target, eps=1e-7):
+        # type: (numpy.ndarray, numpy.ndarray) -> GradientBoostingClassifier
 
-    def _anti_gradient(self, target, previous_predict):
-        # type: (numpy.ndarray, numpy.ndarray) -> numpy.ndarray
-        return target - self._sigmoid(previous_predict)
+        pos = numpy.sum(target)
+        neg = target.shape[0] - pos
+        self.init_scale = numpy.log(pos / neg)
+        previous_predict = numpy.ones(shape=(data.shape[0], )) * self.init_scale
 
-    def _best_b(self, target, model_predict, previous_predict):
-        # type: (numpy.ndarray, numpy.ndarray, numpy.ndarray) -> float
-        def g(x):
-            res = ((self._sigmoid(previous_predict + x * model_predict) - target) * model_predict)
-            return res.sum()
-
-        def dg(x):
-            res = (
-                self._sigmoid(previous_predict + x * model_predict) *
-                (1 - self._sigmoid(previous_predict + x * model_predict)) *
-                numpy.power(model_predict, 2)
-            )
-            return res.sum()
-
-        b = 0
-        while abs(g(b)) > 1e-6:
-            b -= g(b) / dg(b)
-        return b
-
-    def fit(self, data, eps=1e-7):
-        # type: (Data) -> GradientBoostingClassifier
-
-        previous_predict = numpy.ones(shape=(data.shape[0], ))
-        if self.init_model is not None:
-            self.init_model.fit(data)
-            previous_predict = self.init_model.predict(data)
-
-        for _ in range(1, self.n_estimators):
+        for _ in tqdm.tqdm(range(self.n_estimators)):
             tree = DecisionTreeRegressor(max_depth=self.max_depth)
-            # tree = SkTree(max_depth=self.max_depth)
-            anti_gradient = self._anti_gradient(data.target, previous_predict)
-            tree_data = Data(data=data.data, target=anti_gradient)
+            anti_gradient = self.negative_gradient(target, previous_predict)
 
-            tree.fit(tree_data)
-            # tree.fit(tree_data.data, tree_data.target)
-            tree_predict = tree.predict(tree_data)
-            # tree_predict = tree.predict(tree_data.data)
-            b = self._best_b(data.target.reshape((-1, )), tree_predict, previous_predict)
+            tree.fit(data, anti_gradient)
+            previous_predict = self.update_tree(tree, data, target, previous_predict)
+            self.trained_estimators.append(tree)
 
-            self.trained_estimators.append(Estimator(model=tree, b=b))
-            previous_predict += b * tree_predict * self.learning_rate
-
-            if abs(self._loss(data.target, (previous_predict > 0) * 1)) < eps:
+            if abs(self._loss(target, (previous_predict > 0) * 1)) < eps:
                 print('model is ready')
                 return self
 
         return self
 
+    def update_tree(self, tree, data, target, previous_predict):
+        # type: (DecisionTreeRegressor, numpy.ndarray, numpy.ndarray) -> numpy.ndarray
+
+        for node in tree.leafs():
+            node_target = target[node.mask]
+            node_prob = sigmoid(previous_predict[node.mask])
+
+            numerator = numpy.sum(node_prob - node_target)
+            denominator = numpy.sum(node_prob * (1 - node_prob))
+
+            if abs(denominator) < 1e-17:
+                node.leaf_value = 0.0
+            else:
+                node.leaf_value = -numerator / denominator * self.learning_rate
+
+        return previous_predict + tree.predict(data)
+
     def predict(self, data):
-        # type: (Data) -> numpy.ndarray
+        # type: (numpy.ndarray) -> numpy.ndarray
 
-        predict = numpy.ones(shape=(data.shape[0], ))
-        if self.init_model is not None:
-            predict = self.init_model.predict(data)
-            
+        predict = numpy.ones(shape=(data.shape[0],)) * self.init_scale
+
         for estimator in self.trained_estimators:
-            predict += estimator.model.predict(data) * estimator.b * self.learning_rate
-            # predict += estimator.model.predict(data.data) * estimator.b * self.learning_rate
+            predict += estimator.predict(data)
 
-        return (predict > 0) * 1
+        return (sigmoid(predict) > 0.5) * 1
 
     def staged_predict(self, data):
-        # type: (Data) -> None
+        # type: (numpy.ndarray) -> None
 
-        current_predict = numpy.ones(shape=(data.shape[0],))
-        if self.init_model is not None:
-            current_predict = self.init_model.predict(data.data)
-        yield (current_predict > 0) * 1
+        current_predict = numpy.ones(shape=(data.shape[0],)) * self.init_scale
 
         for i, estimator in enumerate(self.trained_estimators):
-            # current_predict += estimator.model.predict(data.data) * estimator.b * self.learning_rate
-            current_predict += estimator.model.predict(data) * estimator.b * self.learning_rate
-            yield (current_predict > 0) * 1
+            current_predict += estimator.predict(data)
+            yield (sigmoid(current_predict) > 0.5) * 1
 
     def staged_predict_proba(self, data):
-        # type: (Data) -> None
+        # type: (numpy.ndarray) -> None
 
-        current_predict = numpy.ones(shape=(data.shape[0],))
-        if self.init_model is not None:
-            current_predict = self.init_model.predict(data.data)
-        yield self._sigmoid(current_predict)
+        current_predict = numpy.ones(shape=(data.shape[0],)) * self.init_scale
 
         for i, estimator in enumerate(self.trained_estimators):
-            # current_predict += estimator.model.predict(data.data) * estimator.b * self.learning_rate
-            current_predict += estimator.model.predict(data) * estimator.b * self.learning_rate
-            yield self._sigmoid(current_predict)
+            current_predict += estimator.predict(data)
+            yield sigmoid(current_predict)
 
     def reset(self):
         self.trained_estimators = []

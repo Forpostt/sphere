@@ -3,35 +3,6 @@
 import numpy
 
 
-class Data(object):
-    def __init__(self, data, target):
-        # type: (numpy.ndarray, numpy.ndarray) -> None
-
-        self.data = data
-        self.target = target
-
-        self._prepared = False
-
-    @property
-    def prepared(self):
-        return self._prepared
-
-    @property
-    def shape(self):
-        return self.data.shape
-
-    def setup(self):
-        # type: () -> None
-
-        if self._prepared:
-            return
-
-        if not isinstance(self.data, numpy.ndarray):
-            raise ValueError('data is not numpy array')
-
-        self._prepared = True
-
-
 class Predicate(object):
     def __init__(self, feature_id, value):
         self._feature_id = feature_id
@@ -58,6 +29,7 @@ class TreeNode(object):
 
         self.left = None
         self.right = None
+        self.is_leaf = False
 
         self.mask = mask
 
