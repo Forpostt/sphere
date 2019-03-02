@@ -3,8 +3,8 @@
 import tqdm
 import numpy
 
-from gbm import DecisionTreeRegressor
-from gbm.utils import sigmoid
+from gbm.models import DecisionTreeRegressor
+from gbm.utils import sigmoid, log_loss, negative_gradient
 
 
 class Estimator(object):
@@ -16,19 +16,8 @@ class Estimator(object):
         return self.model.predict(data) * self.b
 
 
-class GradientBoostingClassifier(object):    
-    @staticmethod
-    def _loss(target, predict):
-        # type: (numpy.ndarray, numpy.ndarray) -> float
-        p = sigmoid(predict) + 1e-7
-        return (-target * numpy.log(p) - (1 - target) * numpy.log(1 - p)).sum()
-
-    @staticmethod
-    def negative_gradient(target, previous_predict):
-        # type: (numpy.ndarray, numpy.ndarray) -> numpy.ndarray
-        return target - sigmoid(previous_predict)
-
-    def __init__(self, n_estimators, max_depth=None, learning_rate=0.1):
+class GradientBoostingClassifier(object):
+    def __init__(self, n_estimators=100, max_depth=3, learning_rate=0.1):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.learning_rate = learning_rate
@@ -46,13 +35,13 @@ class GradientBoostingClassifier(object):
 
         for _ in tqdm.tqdm(range(self.n_estimators)):
             tree = DecisionTreeRegressor(max_depth=self.max_depth)
-            anti_gradient = self.negative_gradient(target, previous_predict)
+            anti_gradient = negative_gradient(target, previous_predict)
 
             tree.fit(data, anti_gradient)
             previous_predict = self.update_tree(tree, data, target, previous_predict)
             self.trained_estimators.append(tree)
 
-            if abs(self._loss(target, (previous_predict > 0) * 1)) < eps:
+            if abs(log_loss(target, (sigmoid(previous_predict) > 0.5) * 1)) < eps:
                 print('model is ready')
                 return self
 
